@@ -13,9 +13,13 @@
 #include <WiFi.h>           // ESP32 Layer-2 Wi-Fi Stack: Controls radio hardware and DHCP negotiations
 #include <PubSubClient.h>   // MQTT Client Engine: Non-blocking state machine for packet formatting
 #include "DHT.h"            // Adafruit DHT Driver: Handles microsecond-accurate 1-wire bit-streams
+#include "model.h"
+
+// Instantiate the TinyML Decision Tree globally
+Eloquent::ML::Port::TinyMLBrain mlBrain;
 
 // --- Network Access Control Credentials ---
-const char* ssid = "Herro";                           // Target Wi-Fi Access Point (SSID) router string
+const char* ssid = "Mugzi";                           // Target Wi-Fi Access Point (SSID) router string
 const char* password = "2444666668888888";            // Security pass-phrase required to authenticate WPA2
 const char* mqtt_server = "broker.hivemq.com";        // Target MQTT broker address (Currently testing sandbox)
 const char* telemetry_topic = "farmguard/jkuat_node_01/telemetry"; // Cloud outbound channel for telemetry [cite: 387]
@@ -25,9 +29,9 @@ WiFiClient espClient;         // Creates the base network socket client wrapper
 PubSubClient client(espClient); // Wraps the raw TCP socket in the MQTT protocol engine
 
 // --- Hardware GPIO Allocations ---
-const int dhtPin = 4;        // Digital pin for DHT11 1-Wire physical data line
-const int soilPin = 34;      // Analog input pin bound to Internal ADC Channel 1 for soil moisture
-const int relayPin = 5;      // Digital pin driving the transistor switch for the water pump relay
+const int dhtPin = D1;       // XIAO Digital Pin 1
+const int soilPin = A0;      // XIAO Analog Pin 0 (ADC)
+const int relayPin = D2;     // XIAO Digital Pin 2      // Digital pin driving the transistor switch for the water pump relay
 #define DHTTYPE DHT11        // Set library parsing mode to handle 8-bit integer frames from the DHT11
 DHT dht(dhtPin, DHTTYPE);    // Initialize DHT software driver instance
 
@@ -91,7 +95,7 @@ void SensorTask(void *pvParameters) {
     // Scale and limit raw ADC voltage into calibrated percentage range (0% = dry, 100% = wet) [cite: 100]
     int mappedSoil = constrain(map(rawSoil, 2654, 1200, 0, 100), 0, 100);
 
-    // LEVEL 6: Rule-Based Anomaly Detection Engine (The Edge Brain) 
+    /*// LEVEL 6: Rule-Based Anomaly Detection Engine (The Edge Brain) 
     String currentInference = "NORMAL";
 
     if (isnan(t) || isnan(h) || t > 50.0 || t < -10.0 || h < 5.0 || h > 100.0) {
@@ -102,6 +106,25 @@ void SensorTask(void *pvParameters) {
       currentInference = "DRY_STRESS"; // Standard soil moisture drop requiring baseline loop attention
     } else if (t > 38.0) {
       currentInference = "CRITICAL_HIGH_TEMP"; // Moisture is fine, but ambient thermal levels are dangerous
+    }*/
+
+
+    // LEVEL 6: TinyML Edge Inference Engine [Option C]
+    // 1. Package the live readings into a float array [Temp, Hum, Soil]
+    float input_features[3] = { t, h, (float)mappedSoil };
+
+    // 2. Feed the array into the Decision Tree
+    int prediction = mlBrain.predict(input_features);
+
+    // 3. Map the ML output integers back to our system string states
+    String currentInference = "NORMAL"; // Default fallback (Prediction 0)
+    
+    if (prediction == 1) {
+      currentInference = "DRY_STRESS";
+    } else if (prediction == 2) {
+      currentInference = "SEVERE_HEAT_STRESS"; // Or "HEAT_STRESS" based on your Node-RED config
+    } else if (prediction == 3) {
+      currentInference = "SENSOR_FAULT";
     }
 
     // MUTEX LOCK SEQUENCE: Request exclusive write permissions for shared variables [cite: 230]
@@ -281,7 +304,8 @@ void WatchdogTask(void *pvParameters) {
 // INTERRUPT SYSTEM ENTRY, PERIPHERAL INITIALIZATION, & OS BOOT SEQUENCER
 // =========================================================================================================
 void setup() {
-  Serial.begin(115200);                  
+  Serial.begin(115200);   
+  delay(3000);               
   
   // INITIALIZE SAFE FALLBACK HARDWARE MODE
   pinMode(relayPin, INPUT);              // Force pump relay to boot safely disconnected from output logic paths
@@ -301,7 +325,7 @@ void setup() {
   // SPAWN APPLICATION ARCHITECTURE INFRASTRUCTURE ON CPU CORE 1 (Silicon isolated execution)
   xTaskCreatePinnedToCore(SensorTask, "SensTask", 4096, NULL, 1, &SensorTaskHandle, 1);   // Priority 1: Reads peripheral inputs
   xTaskCreatePinnedToCore(ControlTask, "CtrlTask", 2048, NULL, 2, &ControlTaskHandle, 1); // Priority 2: Higher priority ensures immediate local safety actuation
-  xTaskCreatePinnedToCore(DisplayTask, "DispTask", 2048, NULL, 1, &DisplayTaskHandle, 1); // Priority 1: Handles local diagnostics
+  xTaskCreatePinnedToCore(DisplayTask, "DispTask", 4096, NULL, 1, &DisplayTaskHandle, 1); // Priority 1: Handles local diagnostics
   xTaskCreatePinnedToCore(AlertTask, "AlrtTask", 2048, NULL, 1, &AlertTaskHandle, 1);     // Priority 1: Audits emergency state vectors
   
   // SPAWN OPERATING SYSTEM WATCHDOG SUPERVISOR ON CPU CORE 1 (Maximum priority preemptive task scheduling) [cite: 214]
